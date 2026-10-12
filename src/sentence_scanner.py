@@ -1,11 +1,10 @@
 """
 sentence_scanner.py
-Implements sentence-by-sentence early-exit safety scanning.
-Analyzes Gemini's multi-sentence video summary sentence by sentence:
-- Checks each sentence individually with our custom trained classifier.
-- If even ONE sentence is classified as UNSAFE, execution halts immediately
-  (early exit without reading the rest of the text) and outputs UNSAFE.
-- If all sentences pass inspection, it outputs SAFE.
+Comprehensive sentence-level safety audit module (Stage 3):
+- Analyzes Gemini's multi-sentence video narrative across all scenes.
+- Evaluates every sentence thoroughly using the local fine-tuned DeBERTa-v3 Transformer.
+- Aggregates full sequence safety verdicts without early-exit interruptions.
+- Detects all violating statements and reports comprehensive safety metrics.
 """
 
 import os
@@ -15,7 +14,7 @@ import joblib
 
 def split_into_sentences(text: str) -> list[str]:
     """
-    Splits vast multi-line text into individual clean sentences using regex.
+    Splits multi-line text into individual clean sentences using regex.
     Handles standard sentence endings (.!?), newlines, and bullet points.
     """
     if not text or not isinstance(text, str):
@@ -26,13 +25,12 @@ def split_into_sentences(text: str) -> list[str]:
     normalized = re.sub(r"^[•\-\*]\s*", "", normalized)
     normalized = re.sub(r"\s+[•\-\*]\s*", ". ", normalized)
 
-    # Split on sentence boundaries: period, question mark, exclamation mark followed by whitespace
+    # Split on sentence boundaries
     raw_sentences = re.split(r"(?<=[.!?])\s+", normalized)
 
     clean_sentences = []
     for s in raw_sentences:
         clean = s.strip()
-        # Remove trailing/leading punctuation artifacts and keep meaningful sentences
         clean = re.sub(r"^[^\w]+", "", clean)
         if len(clean) >= 8:  # ignore trivial fragments
             clean_sentences.append(clean)
@@ -41,34 +39,38 @@ def split_into_sentences(text: str) -> list[str]:
 
 
 class SentenceSafetyScanner:
-    def __init__(self, model_path: str = None):
-        if model_path is None:
-            # Default to the trained model in models/
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            model_path = os.path.join(base_dir, "models", "kid_safe_classifier.joblib")
+    """Full-sequence safety scanner wrapping local Transformer model."""
 
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Trained model not found at: {model_path}. Run train.py first.")
+    def __init__(self, model_path: str = None, threshold: float = 0.35):
+        self.threshold = threshold
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        deberta_dir = os.path.join(base_dir, "models", "deberta_kid_safe")
+        legacy_path = os.path.join(base_dir, "models", "kid_safe_classifier.joblib")
 
-        self.model = joblib.load(model_path)
-        self.classes = list(self.model.classes_)
-        self.safe_idx = self.classes.index("SAFE") if "SAFE" in self.classes else 0
-        self.unsafe_idx = self.classes.index("UNSAFE") if "UNSAFE" in self.classes else 1
+        if model_path is not None and os.path.isdir(model_path):
+            deberta_dir = model_path
+        elif model_path is not None and os.path.isfile(model_path):
+            legacy_path = model_path
+
+        if os.path.exists(deberta_dir):
+            from .model import load_transformer_model, predict_sequence
+            self.model_type = "transformer"
+            self.model, self.tokenizer, self.device = load_transformer_model(deberta_dir)
+            self.predict_fn = predict_sequence
+        elif os.path.exists(legacy_path):
+            self.model_type = "legacy"
+            self.model = joblib.load(legacy_path)
+            self.classes = list(self.model.classes_)
+            self.safe_idx = self.classes.index("SAFE") if "SAFE" in self.classes else 0
+            self.unsafe_idx = self.classes.index("UNSAFE") if "UNSAFE" in self.classes else 1
+        else:
+            raise FileNotFoundError(
+                f"No model found at {deberta_dir} or {legacy_path}. Run train.py first."
+            )
 
     def scan_text(self, text: str) -> dict:
         """
-        Scans Gemini's vast text output sentence by sentence with early exit.
-        
-        Returns:
-            dict containing:
-            - final_decision: 'SAFE' or 'UNSAFE'
-            - is_safe: bool
-            - early_exit_triggered: bool
-            - trigger_sentence: str (the unsafe sentence that stopped execution, or None)
-            - trigger_index: int (1-based index where scanning stopped, or None)
-            - total_sentences: int (total number of sentences in input text)
-            - sentences_scanned_count: int (number of sentences actually evaluated before stopping)
-            - history: list of evaluated sentences with their individual predictions & confidence
+        Scans complete text across all sentences and returns a full audit log.
         """
         sentences = split_into_sentences(text)
 
@@ -76,23 +78,35 @@ class SentenceSafetyScanner:
             return {
                 "final_decision": "SAFE",
                 "is_safe": True,
-                "early_exit_triggered": False,
-                "trigger_sentence": None,
-                "trigger_index": None,
-                "trigger_confidence": 0.0,
                 "total_sentences": 0,
-                "sentences_scanned_count": 0,
+                "unsafe_count": 0,
+                "safe_count": 0,
+                "violating_sentences": [],
                 "history": []
             }
 
         history = []
+        violating_sentences = []
 
         for idx, sentence in enumerate(sentences, start=1):
-            pred = self.model.predict([sentence])[0]
-            probs = self.model.predict_proba([sentence])[0]
-
-            safe_prob = float(probs[self.safe_idx])
-            unsafe_prob = float(probs[self.unsafe_idx])
+            if self.model_type == "transformer":
+                res = self.predict_fn(
+                    self.model,
+                    self.tokenizer,
+                    sentence,
+                    device=self.device,
+                    threshold=self.threshold
+                )
+                pred = res["verdict"]
+                safe_prob = res["probabilities"]["SAFE"]
+                unsafe_prob = res["probabilities"]["UNSAFE"]
+                conf = res["confidence"]
+            else:
+                pred = self.model.predict([sentence])[0]
+                probs = self.model.predict_proba([sentence])[0]
+                safe_prob = float(probs[self.safe_idx])
+                unsafe_prob = float(probs[self.unsafe_idx])
+                conf = float(max(probs))
 
             record = {
                 "index": idx,
@@ -100,38 +114,28 @@ class SentenceSafetyScanner:
                 "prediction": pred,
                 "safe_probability": round(safe_prob, 4),
                 "unsafe_probability": round(unsafe_prob, 4),
-                "confidence": round(float(max(probs)), 4)
+                "confidence": round(conf, 4)
             }
             history.append(record)
 
-            # CRITICAL REQUIREMENT:
-            # If ONE unsafe sentence is detected -> IMMEDIATELY STOP EXECUTION!
-            # Does not read the rest of the vast text.
             if pred == "UNSAFE":
-                return {
-                    "final_decision": "UNSAFE",
-                    "is_safe": False,
-                    "early_exit_triggered": True,
-                    "trigger_sentence": sentence,
-                    "trigger_index": idx,
-                    "trigger_confidence": round(unsafe_prob, 4),
-                    "total_sentences": len(sentences),
-                    "sentences_scanned_count": idx,
-                    "history": history
-                }
+                violating_sentences.append({
+                    "index": idx,
+                    "sentence": sentence,
+                    "confidence": round(unsafe_prob, 4)
+                })
 
-        # If loop completes without any unsafe sentence:
+        is_safe = len(violating_sentences) == 0
+        final_decision = "SAFE" if is_safe else "UNSAFE"
         avg_safe_conf = sum(h["safe_probability"] for h in history) / len(history)
 
         return {
-            "final_decision": "SAFE",
-            "is_safe": True,
-            "early_exit_triggered": False,
-            "trigger_sentence": None,
-            "trigger_index": None,
-            "trigger_confidence": 0.0,
+            "final_decision": final_decision,
+            "is_safe": is_safe,
             "total_sentences": len(sentences),
-            "sentences_scanned_count": len(sentences),
+            "unsafe_count": len(violating_sentences),
+            "safe_count": len(sentences) - len(violating_sentences),
+            "violating_sentences": violating_sentences,
             "safe_average_confidence": round(avg_safe_conf, 4),
             "history": history
         }

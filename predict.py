@@ -1,56 +1,71 @@
 """
 predict.py
-Simple inference utility for the Kid-Friendly Video Classification Model.
-Loads the trained model and classifies any video scene description into SAFE or UNSAFE.
+Inference module for the Kid-Friendly Video Classifier (Stage 3):
+- Loads local fine-tuned DeBERTa-v3 Transformer model from models/deberta_kid_safe/
+- 100% offline, local PyTorch inference with zero external API dependencies.
+- Calibrated Decision Engine: If P(UNSAFE) >= 0.35 -> UNSAFE, else SAFE.
+- Outputs structured JSON result with verdict, confidence, and narrative.
 """
 
 import os
 import sys
+import json
 import argparse
 
-# Add current directory to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add repository root to python search path
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
-from src.model import load_model
+from src.model import load_transformer_model, predict_sequence
+
+DEFAULT_MODEL_DIR = os.path.join(ROOT_DIR, "models", "deberta_kid_safe")
 
 
-def classify_description(text: str, model_path: str = None) -> dict:
+def classify_description(
+    text: str,
+    model_dir: str = DEFAULT_MODEL_DIR,
+    threshold: float = 0.35,
+    device: str | None = None
+) -> dict:
     """
-    Classifies a video description into SAFE or UNSAFE with confidence probability.
+    Runs local Transformer inference on input narrative text.
+    Returns:
+      {
+        "verdict": "SAFE" | "UNSAFE",
+        "confidence": float,
+        "raw_narrative": str,
+        "probabilities": {"SAFE": float, "UNSAFE": float},
+        "threshold": float
+      }
     """
-    if model_path is None:
-        model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "kid_safe_classifier.joblib")
-
-    model = load_model(model_path)
-    classes = list(model.classes_)
-    prediction = model.predict([text])[0]
-    probabilities = model.predict_proba([text])[0]
-
-    safe_idx = classes.index("SAFE") if "SAFE" in classes else 0
-    unsafe_idx = classes.index("UNSAFE") if "UNSAFE" in classes else 1
-
-    safe_score = float(probabilities[safe_idx])
-    unsafe_score = float(probabilities[unsafe_idx])
-
-    return {
-        "text": text,
-        "prediction": prediction,
-        "is_safe": prediction == "SAFE",
-        "safe_probability": round(safe_score, 4),
-        "unsafe_probability": round(unsafe_score, 4),
-        "confidence": round(float(max(probabilities)), 4)
-    }
+    model, tokenizer, dev = load_transformer_model(model_dir, device=device)
+    result = predict_sequence(
+        model=model,
+        tokenizer=tokenizer,
+        text=text,
+        device=dev,
+        threshold=threshold
+    )
+    return result
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Classify video description as SAFE or UNSAFE")
+    parser = argparse.ArgumentParser(description="Classify video scene description using local DeBERTa-v3")
     parser.add_argument("--text", type=str, help="Video scene description text to evaluate")
+    parser.add_argument("--model_dir", type=str, default=DEFAULT_MODEL_DIR, help="Path to local trained model weights")
+    parser.add_argument("--threshold", type=float, default=0.35, help="Decision threshold for UNSAFE classification")
+    parser.add_argument("--json", action="store_true", help="Print output in raw JSON format")
     args = parser.parse_args()
 
     if args.text:
-        res = classify_description(args.text)
-        print(f"\nResult: {res['prediction']} (Confidence: {res['confidence']*100:.1f}%)")
-        print(f"Safe Probability: {res['safe_probability']*100:.1f}% | Unsafe Probability: {res['unsafe_probability']*100:.1f}%")
+        res = classify_description(args.text, model_dir=args.model_dir, threshold=args.threshold)
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            print(f"\nVerdict: {res['verdict']} (Confidence: {res['confidence']*100:.2f}%)")
+            print(f"Probabilities -> SAFE: {res['probabilities']['SAFE']*100:.2f}%, UNSAFE: {res['probabilities']['UNSAFE']*100:.2f}% (Threshold: {res['threshold']})")
+            print(f"Narrative: \"{res['raw_narrative']}\"")
     else:
         test_examples = [
             "The video displays a group of children playing with building blocks in a colorful kindergarten classroom while laughing.",
@@ -61,16 +76,19 @@ def main():
             "The video captures an armed confrontation where a masked perpetrator threatens people with a weapon and demands valuables."
         ]
 
-        print("=" * 70)
-        print(" Kid-Friendly Video Classifier: Inference Demonstrations")
-        print("=" * 70)
+        print("=" * 80)
+        print(" Stage 3: Local Transformer Inference Demonstrations (DeBERTa-v3)")
+        print(" 100% Offline PyTorch Inference | Zero Third-Party API Calls")
+        print("=" * 80)
+
         for example in test_examples:
-            res = classify_description(example)
-            verdict = res["prediction"]
-            prob = res["safe_probability"] if verdict == "SAFE" else res["unsafe_probability"]
+            res = classify_description(example, model_dir=args.model_dir, threshold=args.threshold)
+            verdict = res["verdict"]
             status = "[  SAFE  ]" if verdict == "SAFE" else "[ UNSAFE ]"
-            print(f"\nInput: \"{example}\"")
-            print(f"Decision: {status} (Confidence: {prob*100:.1f}%)")
+            conf = res["confidence"] * 100
+            p_unsafe = res["probabilities"]["UNSAFE"] * 100
+            print(f"\nNarrative: \"{example}\"")
+            print(f"Decision:  {status} | Confidence: {conf:.2f}% | P(UNSAFE): {p_unsafe:.2f}%")
 
 
 if __name__ == "__main__":

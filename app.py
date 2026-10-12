@@ -1,12 +1,11 @@
 """
 app.py
 Streamlit Web UI Application for Kid-Friendly Video Classification.
-- Allows user to upload any video.
-- Automatically sends the video to Gemini API to generate vast scene descriptions.
-- Passes Gemini output into our custom text classifier.
-- Performs sentence-by-sentence evaluation with IMMEDIATE EARLY EXIT:
-  Stops execution the moment one unsafe statement is detected without reading the rest of the text.
-- Outputs purely SAFE or UNSAFE.
+- Allows user to upload any video or pick a benchmark demo scenario.
+- Automatically sends the video to Gemini Vision API (Stage 2: "Eyes") to generate chronological scene narratives.
+- Passes the scene narratives into our local fine-tuned DeBERTa-v3 Transformer classifier (Stage 3: "Judge").
+- Comprehensively evaluates all sentences across the entire narrative (100% offline local inference).
+- Outputs clear SAFE or UNSAFE verdict with an audit breakdown.
 """
 
 import os
@@ -29,7 +28,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom Styling for Badges and Sentence Inspector
+# Custom Styling
 st.markdown("""
 <style>
     .main-header {
@@ -65,36 +64,19 @@ st.markdown("""
         text-align: center;
         margin: 15px 0;
     }
-    .early-exit-alert {
-        background-color: #fff1f2;
-        border-left: 5px solid #f43f5e;
-        padding: 12px 16px;
-        border-radius: 6px;
-        margin: 12px 0;
-        font-size: 0.95rem;
-    }
     .sentence-card-safe {
         background-color: #f0fdf4;
         border-left: 4px solid #22c55e;
-        padding: 8px 14px;
+        padding: 10px 16px;
         border-radius: 6px;
-        margin-bottom: 8px;
+        margin-bottom: 10px;
     }
     .sentence-card-unsafe {
         background-color: #fef2f2;
         border-left: 4px solid #ef4444;
-        padding: 8px 14px;
+        padding: 10px 16px;
         border-radius: 6px;
-        margin-bottom: 8px;
-    }
-    .sentence-card-skipped {
-        background-color: #f8fafc;
-        border-left: 4px solid #cbd5e1;
-        padding: 8px 14px;
-        border-radius: 6px;
-        margin-bottom: 8px;
-        color: #94a3b8;
-        font-style: italic;
+        margin-bottom: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -109,8 +91,8 @@ def get_scanner():
 def main():
     st.markdown('<div class="main-header">🛡️ Kid-Friendly Video Safety Scanner</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="sub-header">Automated Pipeline: 10s Video &rarr; Gemini Vision AI &rarr; '
-        'Sentence-by-Sentence Early-Exit Classifier &rarr; SAFE / UNSAFE Verdict</div>',
+        '<div class="sub-header">4-Stage Pipeline: Video Ingestion &rarr; Gemini Vision Perception ("Eyes") &rarr; '
+        'Local Transformer Classifier ("Judge") &rarr; Safety Verdict & Audit Log</div>',
         unsafe_allow_html=True
     )
 
@@ -128,19 +110,19 @@ def main():
             "Gemini API Key",
             type="password",
             value=os.environ.get("GEMINI_API_KEY", ""),
-            help="Required for live Gemini video analysis. If left empty, you can use the Demo Scenarios."
+            help="Required for live Gemini video analysis. If left empty, you can use the Benchmark Demo Scenarios."
         )
 
         st.markdown("---")
-        st.markdown("### 🧠 Model Architecture")
-        st.write("- **Model**: Classical Logistic Regression")
-        st.write("- **NLP Features**: TF-IDF (Unigrams + Bigrams)")
-        st.write("- **Dataset**: SafeWatch-Bench-200K (25,000 samples)")
-        st.write("- **Test Accuracy**: **91.52%**")
-        st.write("- **Strategy**: Sentence-by-sentence early-exit")
+        st.markdown("### 🧠 Stage 3 Model Architecture")
+        st.write("- **Backbone**: `microsoft/deberta-v3-base`")
+        st.write("- **Framework**: PyTorch & Hugging Face")
+        st.write("- **Execution**: 100% Offline Local Compute")
+        st.write("- **Training Data**: SafeWatch-Bench (25,000 samples)")
+        st.write("- **Decision Threshold**: P(UNSAFE) &ge; 0.35")
 
         st.markdown("---")
-        st.caption("Developed with classical NLP & machine learning.")
+        st.caption("Child-Safe Video Guardrail System.")
 
     # Workspace Layout
     col_left, col_right = st.columns([1, 1], gap="large")
@@ -162,7 +144,6 @@ def main():
                 type=["mp4", "mov", "webm", "avi"]
             )
             if uploaded_file is not None:
-                # Save temporarily for processing
                 tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                 tfile.write(uploaded_file.read())
                 tfile.flush()
@@ -189,8 +170,8 @@ def main():
                 st.warning("Please upload a video file first!")
                 st.stop()
 
-            # Stage 1: Gemini Video Processing
-            with st.spinner("🤖 Sending video to Gemini API for multimodal scene description..."):
+            # Stage 2: Gemini Video Processing
+            with st.spinner("🤖 Sending video to Gemini API for multimodal scene narrative..."):
                 if mode == "Upload Custom Video":
                     if not api_key_input:
                         st.error("Please provide your Gemini API Key in the sidebar to process custom videos.")
@@ -202,12 +183,12 @@ def main():
                         st.error(f"Gemini API Error: {e}")
                         st.stop()
 
-            # Display Gemini's vast text description
-            with st.expander("📝 Gemini's Generated Video Summary (Full Vast Text)", expanded=False):
+            # Display Gemini's full text narrative
+            with st.expander("📝 Gemini's Generated Video Narrative (Full Scene Text)", expanded=False):
                 st.write(gemini_summary_text)
 
-            # Stage 2: Sentence-by-Sentence Early-Exit Safety Scanning
-            with st.spinner("🔍 Running Sentence-by-Sentence Early-Exit Classifier..."):
+            # Stage 3: Full-Sequence Safety Scanning
+            with st.spinner("🔍 Running Local Transformer Safety Classifier across all scenes..."):
                 t0 = time.time()
                 scan_result = scanner.scan_text(gemini_summary_text)
                 scan_duration = time.time() - t0
@@ -219,65 +200,50 @@ def main():
                     unsafe_allow_html=True
                 )
                 st.success(
-                    f"All {scan_result['total_sentences']} sentences evaluated. "
-                    f"Zero unsafe statements detected. Approved for children!"
+                    f"All {scan_result['total_sentences']} scenes evaluated. "
+                    f"Zero unsafe actions or hazards detected. Approved for children!"
                 )
             else:
                 st.markdown(
                     '<div class="unsafe-badge">❌ UNSAFE (Not Kid-Friendly)</div>',
                     unsafe_allow_html=True
                 )
-                st.markdown(
-                    f'<div class="early-exit-alert">'
-                    f'<strong>⚠️ EARLY-EXIT TRIGGERED!</strong><br>'
-                    f'An unsafe statement was detected at <strong>Sentence #{scan_result["trigger_index"]}</strong>. '
-                    f'Execution was stopped immediately without reading the remaining '
-                    f'{scan_result["total_sentences"] - scan_result["sentences_scanned_count"]} sentence(s)!'
-                    f'</div>',
-                    unsafe_allow_html=True
+                st.error(
+                    f"Found {scan_result['unsafe_count']} unsafe statement(s) out of "
+                    f"{scan_result['total_sentences']} scenes evaluated."
                 )
 
             # Metrics
             m_col1, m_col2, m_col3 = st.columns(3)
             with m_col1:
-                st.metric("Total Sentences in Text", scan_result["total_sentences"])
+                st.metric("Total Scenes Analyzed", scan_result["total_sentences"])
             with m_col2:
-                st.metric("Sentences Scanned Before Stop", scan_result["sentences_scanned_count"])
+                st.metric("Unsafe Violations Found", scan_result["unsafe_count"])
             with m_col3:
-                st.metric("Model Scan Time", f"{scan_duration*1000:.1f} ms")
+                st.metric("Model Execution Time", f"{scan_duration*1000:.1f} ms")
 
-            # Sentence-by-Sentence Execution Breakdown
-            st.markdown("### 🔎 Sentence-by-Sentence Audit Log")
+            # Sentence Audit Log
+            st.markdown("### 🔎 Comprehensive Narrative Audit Log")
 
-            all_sentences = split_into_sentences(gemini_summary_text)
             scanned_records = scan_result["history"]
 
-            for i, sent in enumerate(all_sentences, start=1):
-                if i <= len(scanned_records):
-                    rec = scanned_records[i - 1]
-                    if rec["prediction"] == "SAFE":
-                        st.markdown(
-                            f'<div class="sentence-card-safe">'
-                            f'<strong>Sentence {i} &mdash; <span style="color:#16a34a;">[ SAFE ]</span> '
-                            f'(Safe Prob: {rec["safe_probability"]*100:.1f}%)</strong><br>'
-                            f'"{sent}"'
-                            f'</div>',
-                            unsafe_allow_html=True
-                        )
-                    else:
-                        st.markdown(
-                            f'<div class="sentence-card-unsafe">'
-                            f'<strong>Sentence {i} &mdash; <span style="color:#dc2626;">[ UNSAFE ]</span> '
-                            f'(Unsafe Prob: {rec["unsafe_probability"]*100:.1f}%) &mdash; ⚡ EXECUTION HALTED HERE</strong><br>'
-                            f'"{sent}"'
-                            f'</div>',
-                            unsafe_allow_html=True
-                        )
-                else:
-                    # Skipped sentences due to early-exit!
+            for rec in scanned_records:
+                i = rec["index"]
+                sent = rec["sentence"]
+                if rec["prediction"] == "SAFE":
                     st.markdown(
-                        f'<div class="sentence-card-skipped">'
-                        f'<strong>Sentence {i} &mdash; [ SKIPPED &mdash; NOT EVALUATED ]</strong><br>'
+                        f'<div class="sentence-card-safe">'
+                        f'<strong>Scene {i} &mdash; <span style="color:#16a34a;">[ SAFE ]</span> '
+                        f'(Safe Prob: {rec["safe_probability"]*100:.1f}%)</strong><br>'
+                        f'"{sent}"'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(
+                        f'<div class="sentence-card-unsafe">'
+                        f'<strong>Scene {i} &mdash; <span style="color:#dc2626;">[ UNSAFE ]</span> '
+                        f'(Unsafe Prob: {rec["unsafe_probability"]*100:.1f}%)</strong><br>'
                         f'"{sent}"'
                         f'</div>',
                         unsafe_allow_html=True
